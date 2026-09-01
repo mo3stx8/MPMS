@@ -1,0 +1,222 @@
+// TRADER API ROUTES
+// Add these routes to /supabase/functions/server/index.tsx before the Deno.serve(app.fetch) line
+
+// Get trader dashboard statistics
+app.get("/make-server-85dcafc8/trader-stats", async (c) => {
+  try {
+    const traderEmail = c.req.query('email');
+    
+    if (!traderEmail) {
+      return c.json({ success: false, error: "Trader email required" }, 400);
+    }
+    
+    const containers = await kv.getByPrefix("container:");
+    const dischargeRequests = await kv.getByPrefix("discharge:");
+    const notifications = await kv.getByPrefix("notification:");
+    
+    // Filter trader's data
+    const traderContainers = containers.filter((c: any) => c.traderEmail === traderEmail);
+    const traderDischarges = dischargeRequests.filter((d: any) => d.traderEmail === traderEmail);
+    const traderNotifications = notifications.filter((n: any) => n.traderEmail === traderEmail && !n.read);
+    
+    const arrived = traderContainers.filter((c: any) => c.status === 'arrived').length;
+    const stored = traderContainers.filter((c: any) => c.status === 'assigned').length;
+    const ready = traderContainers.filter((c: any) => c.status === 'ready_discharge').length;
+    
+    const statusChanges = traderNotifications.filter((n: any) => n.type === 'status_change').length;
+    
+    return c.json({
+      success: true,
+      stats: {
+        arrived,
+        stored,
+        readyForDischarge: ready,
+        unreadNotifications: traderNotifications.length,
+        pendingDischarges: traderDischarges.filter((d: any) => d.status === 'pending').length,
+        statusChangeAlerts: statusChanges
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching trader stats:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get trader's containers
+app.get("/make-server-85dcafc8/trader-containers", async (c) => {
+  try {
+    const traderEmail = c.req.query('email');
+    
+    if (!traderEmail) {
+      return c.json({ success: false, error: "Trader email required" }, 400);
+    }
+    
+    const containers = await kv.getByPrefix("container:");
+    const traderContainers = containers.filter((c: any) => c.traderEmail === traderEmail);
+    
+    return c.json({ success: true, containers: traderContainers });
+  } catch (error) {
+    console.error("Error fetching trader containers:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get discharge requests
+app.get("/make-server-85dcafc8/discharge-requests", async (c) => {
+  try {
+    const traderEmail = c.req.query('email');
+    
+    if (!traderEmail) {
+      return c.json({ success: false, error: "Trader email required" }, 400);
+    }
+    
+    const dischargeRequests = await kv.getByPrefix("discharge:");
+    const traderRequests = dischargeRequests.filter((d: any) => d.traderEmail === traderEmail);
+    
+    return c.json({ success: true, requests: traderRequests });
+  } catch (error) {
+    console.error("Error fetching discharge requests:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Submit discharge request
+app.post("/make-server-85dcafc8/discharge-request", async (c) => {
+  try {
+    const { containerId, traderEmail, traderName, requestedDate, notes } = await c.req.json();
+    
+    const container = await kv.get(containerId);
+    if (!container) {
+      return c.json({ success: false, error: "Container not found" }, 404);
+    }
+    
+    if (container.traderEmail !== traderEmail) {
+      return c.json({ success: false, error: "Unauthorized" }, 403);
+    }
+    
+    const allRequests = await kv.getByPrefix("discharge:");
+    const requestNumber = String(allRequests.length + 1).padStart(4, '0');
+    const requestId = `discharge:DR-${requestNumber}`;
+    
+    const dischargeRequest = {
+      id: requestId,
+      requestId: `DR-${requestNumber}`,
+      containerId: container.containerId || container.id,
+      traderEmail,
+      traderName,
+      vesselName: container.vesselName,
+      storageLocation: container.assignedStorage,
+      requestedDate,
+      notes,
+      status: 'pending',
+      submittedAt: new Date().toISOString()
+    };
+    
+    await kv.set(requestId, dischargeRequest);
+    
+    const notifId = `notification:${Date.now()}-${traderEmail}`;
+    await kv.set(notifId, {
+      id: notifId,
+      traderEmail,
+      type: 'discharge_submitted',
+      title: 'Discharge Request Submitted',
+      message: `Your discharge request ${dischargeRequest.requestId} has been submitted`,
+      timestamp: new Date().toISOString(),
+      read: false
+    });
+    
+    return c.json({ success: true, request: dischargeRequest });
+  } catch (error) {
+    console.error("Error submitting discharge request:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get trader notifications
+app.get("/make-server-85dcafc8/trader-notifications", async (c) => {
+  try {
+    const traderEmail = c.req.query('email');
+    
+    if (!traderEmail) {
+      return c.json({ success: false, error: "Trader email required" }, 400);
+    }
+    
+    const notifications = await kv.getByPrefix("notification:");
+    const traderNotifications = notifications.filter((n: any) => n.traderEmail === traderEmail);
+    
+    traderNotifications.sort((a: any, b: any) => 
+      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+    
+    return c.json({ success: true, notifications: traderNotifications });
+  } catch (error) {
+    console.error("Error fetching trader notifications:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Mark notification as read
+app.post("/make-server-85dcafc8/mark-notification-read", async (c) => {
+  try {
+    const { notificationId } = await c.req.json();
+    
+    const notification = await kv.get(notificationId);
+    if (!notification) {
+      return c.json({ success: false, error: "Notification not found" }, 404);
+    }
+    
+    notification.read = true;
+    await kv.set(notificationId, notification);
+    
+    return c.json({ success: true, notification });
+  } catch (error) {
+    console.error("Error marking notification as read:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Initialize trader data
+app.post("/make-server-85dcafc8/init-trader-data", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const traderEmail = body.traderEmail || 'trader@example.com';
+    
+    const traderContainers = [
+      { id: 'container:TCONT-001', containerId: 'TCONT-001', vesselName: 'MV Atlantic Pride', traderEmail, trader: 'Maritime Trading Co.', weight: 500, type: 'general', status: 'arrived', assignedStorage: null, arrivalDate: new Date(Date.now() - 86400000 * 2).toISOString() },
+      { id: 'container:TCONT-002', containerId: 'TCONT-002', vesselName: 'MV Eastern Star', traderEmail, trader: 'Maritime Trading Co.', weight: 300, type: 'refrigerated', status: 'assigned', assignedStorage: 'Cold Storage 1', arrivalDate: new Date(Date.now() - 86400000 * 5).toISOString() },
+      { id: 'container:TCONT-003', containerId: 'TCONT-003', vesselName: 'MV Pacific Dawn', traderEmail, trader: 'Maritime Trading Co.', weight: 450, type: 'general', status: 'assigned', assignedStorage: 'General Storage A', arrivalDate: new Date(Date.now() - 86400000 * 3).toISOString() },
+      { id: 'container:TCONT-004', containerId: 'TCONT-004', vesselName: 'MV Ocean Star', traderEmail, trader: 'Maritime Trading Co.', weight: 600, type: 'bulk', status: 'ready_discharge', assignedStorage: 'Bulk Storage B', arrivalDate: new Date(Date.now() - 86400000 * 7).toISOString() },
+      { id: 'container:TCONT-005', containerId: 'TCONT-005', vesselName: 'MV Golden Wave', traderEmail, trader: 'Maritime Trading Co.', weight: 400, type: 'general', status: 'ready_discharge', assignedStorage: 'General Storage A', arrivalDate: new Date(Date.now() - 86400000 * 10).toISOString() }
+    ];
+    
+    for (const container of traderContainers) {
+      await kv.set(container.id, container);
+    }
+    
+    const dischargeRequests = [
+      { id: 'discharge:DR-0001', requestId: 'DR-0001', containerId: 'TCONT-004', traderEmail, traderName: 'Maritime Trading Co.', vesselName: 'MV Ocean Star', storageLocation: 'Bulk Storage B', requestedDate: new Date(Date.now() + 86400000).toISOString(), notes: 'Ready for pickup', status: 'pending', submittedAt: new Date(Date.now() - 3600000).toISOString() },
+      { id: 'discharge:DR-0002', requestId: 'DR-0002', containerId: 'TCONT-002', traderEmail, traderName: 'Maritime Trading Co.', vesselName: 'MV Eastern Star', storageLocation: 'Cold Storage 1', requestedDate: new Date(Date.now() - 86400000).toISOString(), notes: 'Urgent discharge needed', status: 'approved', submittedAt: new Date(Date.now() - 86400000 * 2).toISOString(), approvedAt: new Date(Date.now() - 86400000).toISOString(), approvedBy: 'Port Officer Ahmed' },
+      { id: 'discharge:DR-0003', requestId: 'DR-0003', containerId: 'TCONT-003', traderEmail, traderName: 'Maritime Trading Co.', vesselName: 'MV Pacific Dawn', storageLocation: 'General Storage A', requestedDate: new Date(Date.now() - 86400000 * 3).toISOString(), notes: 'Standard discharge', status: 'rejected', submittedAt: new Date(Date.now() - 86400000 * 4).toISOString(), rejectionReason: 'Storage area undergoing inspection. Please resubmit after 48 hours.' }
+    ];
+    
+    for (const request of dischargeRequests) {
+      await kv.set(request.id, request);
+    }
+    
+    const notifications = [
+      { id: `notification:${Date.now()}-1`, traderEmail, type: 'status_change', title: 'Container Status Updated', message: 'Container TCONT-004 is now ready for discharge', timestamp: new Date(Date.now() - 7200000).toISOString(), read: false },
+      { id: `notification:${Date.now()}-2`, traderEmail, type: 'discharge_approved', title: 'Discharge Request Approved', message: 'Your discharge request DR-0002 has been approved', timestamp: new Date(Date.now() - 86400000).toISOString(), read: false },
+      { id: `notification:${Date.now()}-3`, traderEmail, type: 'discharge_rejected', title: 'Discharge Request Rejected', message: 'Your discharge request DR-0003 has been rejected. Check details.', timestamp: new Date(Date.now() - 86400000 * 2).toISOString(), read: false },
+      { id: `notification:${Date.now()}-4`, traderEmail, type: 'clearance', title: 'Clearance Document Available', message: 'Clearance document for TCONT-002 is ready for download', timestamp: new Date(Date.now() - 86400000 * 3).toISOString(), read: true }
+    ];
+    
+    for (const notification of notifications) {
+      await kv.set(notification.id, notification);
+    }
+    
+    return c.json({ success: true, message: 'Trader data initialized', created: { containers: traderContainers.length, dischargeRequests: dischargeRequests.length, notifications: notifications.length } });
+  } catch (error) {
+    console.error("Error initializing trader data:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
